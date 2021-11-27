@@ -7,6 +7,7 @@ import time
 import requests
 from gooey import Gooey, GooeyParser
 import json
+import subprocess
 from nacl.encoding import HexEncoder, RawEncoder
 from nacl.signing import SigningKey, VerifyKey
 import hashlib
@@ -45,43 +46,6 @@ def createTransaction(blockId, pubKey, privKey, toAddr, fromAddr, amount, fee):
     return transaction
 
 
-
-def createWallet():
-    # # Generate a new random signing key
-    signing_key = SigningKey.generate()
-    verify_key = signing_key.verify_key
-    verify_key_hex = verify_key.encode(encoder=HexEncoder)
-    signing_key_hex = signing_key.encode(encoder=HexEncoder)
-    pubKey = str(verify_key_hex, encoding='utf8').upper()
-    privateKey = str(signing_key_hex, encoding='utf8').upper()
-    hash = nacl.hash.sha256(bytes.fromhex(pubKey)).decode('utf8').upper()
-    hash = bytearray.fromhex(hash)
-    hash2 = hashlib.new('ripemd160', hash).hexdigest().upper()
-    hash2 = bytes.fromhex(hash2)
-    hash3 = nacl.hash.sha256(hash2).decode('utf8').upper()
-    hash4 = nacl.hash.sha256(bytes.fromhex(hash3)).decode('utf8').upper()
-    h2 = hash2
-    h4 = bytes.fromhex(hash4)
-    checksum = h4[0]
-
-    address = bytearray(25*[0])
-    address[0] = 0
-
-    for i in range(1,21):
-        address[i] = h2[i-1]
-    address[21] = h4[0]
-    address[22] = h4[1]
-    address[23] = h4[2]
-    address[24] = h4[3]
-    wallet = address.hex().upper()
-    ret = {
-        "wallet": wallet,
-        "privateKey": privateKey,
-        "publicKey": pubKey
-    }
-    return ret
-
-
 def display_message():
     if sys.argv[1] == 'Check-Balance':
         to_check = sys.argv[3]
@@ -104,27 +68,18 @@ def display_message():
         else:
             print("======GENERATING WALLET=======")
             time.sleep(1)
-            data = createWallet()
-            f = open(path, 'w')
-            f.write(json.dumps(data, indent=4))
+            output = subprocess.check_output(['./keygen', path])
+            print(output)
             print("[SUCCESS] Key file : " + path + " saved")
-            print("New wallet address is : " + data["wallet"])
     elif sys.argv[1] == 'Send-Coins':
         retries = int(sys.argv[3])
         blockDelta = int(sys.argv[5])
         keyFile = sys.argv[7]
         toWallet = sys.argv[8]
-        amount = int(sys.argv[9])*10000
-        fee = int(sys.argv[10])*10000
-        print("======GENERATING TRANSACTION=======")
-        print(">to = " + toWallet)
-        print(">keyFile = " + keyFile)
-        print(">amount = " + str(amount))
-        print(">fee = " + str(fee))
-        print(">retries = " + str(retries))
-        print(">blockDelta = " + str(blockDelta))
+        amount = float(sys.argv[9])
+        fee = float(sys.argv[10])
         for i in range(0, retries):
-            print("======GETTING CHAIN HOST=======")
+            print("[STATUS] Sending transaction (Attempt " + str(i+1) + ")")
             servers =  ["http://localhost:3000"] #json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=3).text)
             bestCount = 0
             bestServers = []
@@ -141,40 +96,34 @@ def display_message():
                 except:
                     continue
             if (len(bestServers) == 0):
-                print("[ERROR] COULD NOT CONNECT TO ANY NODE")
+                print("[ERROR] Couldn't reach any nodes")
             else:
                 server = random.choice(bestServers)
                 targetBlock = bestCount + blockDelta
-                # load key files
-                wallet = json.loads(open(keyFile).read())
-                fromWallet = wallet["wallet"]
-                privKey = SigningKey(wallet["privateKey"], encoder=HexEncoder)
-                pubKey = VerifyKey(wallet["publicKey"], encoder=HexEncoder)
-                tx = createTransaction(targetBlock, pubKey, privKey, toWallet, fromWallet, amount, fee)
-                print("===== TRANSACTION CREATED ======")
-                print(json.dumps(tx, indent=4))
-                response = json.loads(requests.post(server + '/add_transaction_json', json=tx, timeout=2).text)
-                print("===== TRANSACTION SENT =======")
-                print(response)
+                txHex = subprocess.check_output(['./txgen', keyFile, toWallet, str(amount), str(fee), str(targetBlock)]).decode('utf8')
+                rawTx = bytearray.fromhex(txHex)
+                response = json.loads(requests.post(server + '/add_transaction', data=rawTx, headers={'Content-Type': 'application/octet-stream'}, timeout=2).text)
+
                 if "status" in response and response["status"] == "SUCCESS":
-                    print("===== TRANSACTION ACCEPTED, WAITING FOR TARGET BLOCK=======")
+                    print("[STATUS] Transaction received by node. Awaiting confirmation.")
                     while True:
                         num = int(requests.get(server + "/block_count", timeout=1).text)
                         time.sleep(1)
-                        print("Current block: " + str(num) + " tx target block: " + str(targetBlock))
+                        print("[STATUS] Current block: " + str(num) + ", tx target block: " + str(targetBlock))
                         if num >= targetBlock:
-                            print("===== GOT TO TARGET BLOCK, CHECKING STATUS ======")
-                            response = json.loads(requests.post(server + '/verify_transaction_json', json=tx, timeout=2).text)
-                            print(response)
+                            print("[STATUS] Reached tx target block, confirming")
+                            response = json.loads(requests.post(server + '/verify_transaction', data=rawTx, headers={'Content-Type': 'application/octet-stream'}, timeout=2).text)
+                            
                             if 'error' in response:
-                                print("===== TRANSACTION NOT IN TARGET BLOCK, RETRYING ======")
+                                print("[STATUS] Transaction was not confirmed. Retrying.")
                                 break
                             else:
-                                print("===== TRANSACTION SUCCESSFUL ======")
+                                print("[STATUS] Transaction was confirmed.")
                                 return
                 else:
-                    print("===== TRANSACTION NOT ACCEPTED =======")
-        print("===== ALL RETRIES FINISHED, TRANSACTION FAILED ======")
+                    print("[ERROR] Transaction not accepted.")
+                    print(response)
+        print("[ERROR] All attempts fialed")
 
 
     else:
@@ -185,7 +134,7 @@ file_checker = """
 """
 
 
-@Gooey(program_name="PandaCoin Wallet", advanced=True, clear_before_run=True, richtext_controls=True, header_bg_color='#000000', default_size=(640,700), show_restart_button=False, show_success_modal=False, tabbed_groups=True, navigation='Tabbed',disable_stop_button=True, optional_cols=2) #@Gooey(optional_cols=2, program_name="PandaCoin Wallet")
+@Gooey(program_name="PandaCoin Wallet", advanced=True, clear_before_run=True, richtext_controls=True, header_bg_color='#000000', default_size=(640,600), show_restart_button=False, show_success_modal=False, tabbed_groups=True, navigation='Tabbed',disable_stop_button=True, optional_cols=2) #@Gooey(optional_cols=2, program_name="PandaCoin Wallet")
 def main():
     settings_msg = ''
     parser = GooeyParser(description=settings_msg)
@@ -197,8 +146,8 @@ def main():
     create_key_parser.add_argument(
         "Save Location", help="Location to store key file", widget="FileSaver", default="./keys.json", gooey_options={'default_file': 'keys.json'}) 
     
-    create_key_parser.add_argument(
-        "Confirmation",  help="I understand that if I lose or delete the key file I will no longer have access to my funds. Type 'confirm-pandacoin-wallet' into the box below to confirm:", gooey_options={'full_width': True, 'validator':{ 'test': 'user_input=="confirm-pandacoin-wallet"', 'message': 'Please type "confirm-pandacoin-wallet" to confirm wallet creation'}})
+    # create_key_parser.add_argument(
+    #     "Confirmation",  help="I understand that if I lose or delete the key file I will no longer have access to my funds. Type 'confirm-pandacoin-wallet' into the box below to confirm:", gooey_options={'full_width': True, 'validator':{ 'test': 'user_input=="confirm-pandacoin-wallet"', 'message': 'Please type "confirm-pandacoin-wallet" to confirm wallet creation'}})
 
 
 
@@ -226,13 +175,13 @@ def main():
         "Fee"
     )
 
-    transfer_parser.add_argument(
-        "Confirmation",  help="I understand that once I click start, I cannot revoke, edit, or cancel the transaction. Type 'confirm-pandacoin-send' into the box below to confirm:", gooey_options={'validator':{ 'test': 'user_input=="confirm-pandacoin-send"', 'message': 'Please type "confirm-pandacoin-send" to confirm transaction'}})
+    # transfer_parser.add_argument(
+    #     "Confirmation",  help="I understand that once I click start, I cannot revoke, edit, or cancel the transaction. Type 'confirm-pandacoin-send' into the box below to confirm:", gooey_options={'validator':{ 'test': 'user_input=="confirm-pandacoin-send"', 'message': 'Please type "confirm-pandacoin-send" to confirm transaction'}})
 
     transfer_parser.add_argument('-r', '--retries', default=2,  widget='IntegerField',
                                 type=int, help='Number of times to retry submitting the transaction before giving up.\n(min=0, max=10)', gooey_options={'min': 0, 'max':10})
     
-    transfer_parser.add_argument('-b', '--block_delta', default=2, widget='IntegerField',
+    transfer_parser.add_argument('-b', '--block_delta', default=1, widget='IntegerField',
                                 type=int, help='The block delta specifies how many blocks in the future the transaction should be executed. A larger block delta increases the likelihood the transaction is accepted, but causes a longer execution time.\n (min=1, max=7)', gooey_options={'min': 1, 'max':7})
 
     parser.parse_args()
