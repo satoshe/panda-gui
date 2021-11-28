@@ -80,7 +80,7 @@ def display_message():
         fee = float(sys.argv[10])
         for i in range(0, retries):
             print("[STATUS] Sending transaction (Attempt " + str(i+1) + ")")
-            servers =  ["http://localhost:3000"] #json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=3).text)
+            servers =  json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=3).text)
             bestCount = 0
             bestServers = []
             # fetch the best server
@@ -123,7 +123,7 @@ def display_message():
                 else:
                     print("[ERROR] Transaction not accepted.")
                     print(response)
-        print("[ERROR] All attempts fialed")
+        print("[ERROR] All attempts failed")
 
 
     else:
