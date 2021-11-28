@@ -1,2 +1,2 @@
-pyinstaller -D --windowed app.py --noconfirm --icon panda.ico --add-data keygen:. --add-data txgen:.
+pyinstaller -D --windowed app.py --noconfirm --icon panda.ico --add-data keygen:. --add-data txgen:. -n PandaWallet
 
