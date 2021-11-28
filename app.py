@@ -11,49 +11,52 @@ import subprocess
 from nacl.encoding import HexEncoder, RawEncoder
 from nacl.signing import SigningKey, VerifyKey
 import hashlib
+import os
 from os.path import exists
 import nacl.hash
 import time
 import random, string
 
-def signTransaction(tx, privateKey):
-    blockId = tx['id'].to_bytes(4, 'little') 
-    signingKey = bytearray.fromhex(tx["signingKey"])
-    timestamp = int(tx['timestamp']).to_bytes(8, 'little') 
-    nonce = bytearray(tx['nonce'], encoding='utf8')
-    toWallet = bytearray.fromhex(tx["to"])
-    fromWallet = bytearray.fromhex(tx["from"])
-    amount = tx["amount"].to_bytes(8, 'little') 
-    fee = tx["fee"].to_bytes(8, 'little') 
-    isFee = bytearray([0])    
-    all_bytes = toWallet + fromWallet + fee + amount + nonce + blockId + timestamp
-    hashed = nacl.hash.sha256(bytes(all_bytes))
-    signature = privateKey.sign(hashed, encoder=HexEncoder)
-    return str(signature, encoding='utf8').upper()
+DEFAULT_TIMEOUT = 4
 
-def createTransaction(blockId, pubKey, privKey, toAddr, fromAddr, amount, fee):
-    transaction = {}
-    transaction["id"] = blockId
-    transaction["signingKey"] = str(pubKey.encode(encoder=HexEncoder), encoding='utf8').upper()
-    transaction["timestamp"] = str(int(time.time()))
-    transaction["to"] = toAddr
-    transaction["from"] = fromAddr
-    transaction["amount"] = amount
-    transaction["fee"] = fee
-    x = ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for _ in range(8))
-    transaction["nonce"] = x
-    transaction["signature"] = signTransaction(transaction, privKey)
-    return transaction
+class Unbuffered(object):
+    def __init__(self, stream):
+        self.stream = stream
 
+    def write(self, data):
+        self.stream.write(data)
+        self.stream.flush()
+
+    def writelines(self, datas):
+        self.stream.writelines(datas)
+        self.stream.flush()
+
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+import sys
+sys.stdout = Unbuffered(sys.stdout)
+
+import sys, os
+if getattr(sys, 'frozen', False):
+    # If the application is run as a bundle, the PyInstaller bootloader
+    # extends the sys module by a flag frozen=True and sets the app 
+    # path into variable _MEIPASS'.
+    application_path = sys._MEIPASS
+else:
+    application_path = os.path.dirname(os.path.abspath(__file__))
+
+def printToConsole(s):
+    print(s)
 
 def display_message():
     if sys.argv[1] == 'Check-Balance':
         to_check = sys.argv[3]
-        print("Loading balance for " + to_check)
-        servers = json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=3).text)
+        printToConsole("Loading balance for " + to_check)
+        servers = json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=DEFAULT_TIMEOUT).text)
         for server in servers:
             try:
-                balance = json.loads(requests.get(server + "/ledger/" + to_check, timeout=3).text)
+                balance = json.loads(requests.get(server + "/ledger/" + to_check, timeout=DEFAULT_TIMEOUT).text)
                 if 'error' in balance.keys():
                     print ("Wallet not found on " + server)
                 else:
@@ -64,13 +67,14 @@ def display_message():
     elif sys.argv[1] == 'Create-Wallet':
         path = sys.argv[3]
         if (exists(path)):
-            print("[ERROR] File : " + path + " already exists.")
+            printToConsole("[ERROR] File : " + path + " already exists.")
         else:
-            print("======GENERATING WALLET=======")
+            printToConsole("======GENERATING WALLET=======")
             time.sleep(1)
-            output = subprocess.check_output(['./keygen', path])
-            print(output)
-            print("[SUCCESS] Key file : " + path + " saved")
+            output = subprocess.check_output([application_path + '/keygen', path])
+            wallet = json.loads(open(path, "r").read())["wallet"]
+            printToConsole("[SUCCESS] Key file : " + path + " saved")
+            printToConsole("New wallet address is: " + wallet)
     elif sys.argv[1] == 'Send-Coins':
         retries = int(sys.argv[3])
         blockDelta = int(sys.argv[5])
@@ -78,16 +82,17 @@ def display_message():
         toWallet = sys.argv[8]
         amount = float(sys.argv[9])
         fee = float(sys.argv[10])
+        printToConsole("[STATUS] Starting send")
         for i in range(0, retries):
-            print("[STATUS] Sending transaction (Attempt " + str(i+1) + ")")
-            servers =  json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=3).text)
+            printToConsole("[STATUS] Sending transaction (Attempt " + str(i+1) + ")")
+            servers =  json.loads(requests.get('http://ec2-34-218-176-84.us-west-2.compute.amazonaws.com/hosts',timeout=DEFAULT_TIMEOUT).text)
             bestCount = 0
             bestServers = []
             # fetch the best server
             for server in servers:
                 # get block count:
                 try:
-                    num = int(requests.get(server + "/block_count", timeout=1).text)
+                    num = int(requests.get(server + "/block_count", timeout=DEFAULT_TIMEOUT).text)
                     if num > bestCount:
                         bestServers = [server]
                         bestCount = num
@@ -96,38 +101,41 @@ def display_message():
                 except:
                     continue
             if (len(bestServers) == 0):
-                print("[ERROR] Couldn't reach any nodes")
+                printToConsole("[ERROR] Couldn't reach any nodes")
             else:
                 server = random.choice(bestServers)
                 targetBlock = bestCount + blockDelta
-                txHex = subprocess.check_output(['./txgen', keyFile, toWallet, str(amount), str(fee), str(targetBlock)]).decode('utf8')
+                txHex = subprocess.check_output([application_path + '/txgen', keyFile, toWallet, str(amount), str(fee), str(targetBlock)]).decode('utf8')
                 rawTx = bytearray.fromhex(txHex)
                 response = json.loads(requests.post(server + '/add_transaction', data=rawTx, headers={'Content-Type': 'application/octet-stream'}, timeout=2).text)
 
                 if "status" in response and response["status"] == "SUCCESS":
-                    print("[STATUS] Transaction received by node. Awaiting confirmation.")
+                    printToConsole("[STATUS] Transaction received by node. Awaiting confirmation.")
                     while True:
-                        num = int(requests.get(server + "/block_count", timeout=1).text)
-                        time.sleep(1)
-                        print("[STATUS] Current block: " + str(num) + ", tx target block: " + str(targetBlock))
-                        if num >= targetBlock:
-                            print("[STATUS] Reached tx target block, confirming")
-                            response = json.loads(requests.post(server + '/verify_transaction', data=rawTx, headers={'Content-Type': 'application/octet-stream'}, timeout=2).text)
-                            
-                            if 'error' in response:
-                                print("[STATUS] Transaction was not confirmed. Retrying.")
-                                break
-                            else:
-                                print("[STATUS] Transaction was confirmed.")
-                                return
+                        try:
+                            num = int(requests.get(server + "/block_count", timeout=DEFAULT_TIMEOUT).text)
+                            time.sleep(1)
+                            printToConsole("[STATUS] Current block: " + str(num) + ", tx target block: " + str(targetBlock))
+                            if num >= targetBlock:
+                                printToConsole("[STATUS] Reached tx target block, confirming")
+                                response = json.loads(requests.post(server + '/verify_transaction', data=rawTx, headers={'Content-Type': 'application/octet-stream'}, timeout=2).text)
+                                
+                                if 'error' in response:
+                                    printToConsole("[STATUS] Transaction was not confirmed. Retrying.")
+                                    break
+                                else:
+                                    printToConsole("[STATUS] Transaction was confirmed.")
+                                    return
+                        except:
+                            printToConsole("[ERROR] Could not fetch status from node.")
                 else:
-                    print("[ERROR] Transaction not accepted.")
-                    print(response)
-        print("[ERROR] All attempts failed")
+                    printToConsole("[ERROR] Transaction not accepted.")
+                    printToConsole(response)
+        printToConsole("[ERROR] All attempts failed")
 
 
     else:
-        print("Unknown command")
+        printToConsole("Unknown command")
 
 file_checker = """
 '.json' in user_input and 'privateKey' in open(user_input).read()
